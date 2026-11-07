@@ -1,0 +1,10 @@
+.env
+mobile/node_modules/
+mobile/.expo/
+.DS_Store
+uploads/flyers/*
+uploads/complaints/*
+uploads/branding/*
+!uploads/flyers/.gitkeep
+!uploads/complaints/.gitkeep
+!uploads/branding/.gitkeep

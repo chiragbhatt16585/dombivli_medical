@@ -1,0 +1,15 @@
+Options -Indexes
+RewriteEngine On
+
+RewriteRule ^(?:includes|config|database)(?:/|$) - [R=404,L]
+RewriteRule ^router\.php$ - [R=404,L]
+RewriteRule (^|/)\.env$ - [R=404,L]
+RewriteRule \.sql$ - [R=404,L]
+
+RewriteCond %{REQUEST_FILENAME} -f
+RewriteRule ^ - [L]
+
+RewriteRule ^api(?:/.*)?$ api/index.php [L,QSA]
+RewriteRule ^admin/?$ admin/index.html [L]
+RewriteRule ^member/?$ member/index.html [L]
+RewriteRule ^$ member/index.html [L]
