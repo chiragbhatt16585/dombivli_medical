@@ -68,6 +68,7 @@ require __DIR__ . '/http.php';
 require __DIR__ . '/application_pdf.php';
 require __DIR__ . '/db.php';
 require __DIR__ . '/auth.php';
+require __DIR__ . '/permissions.php';
 require __DIR__ . '/routemobile.php';
 
 set_exception_handler(static function (Throwable $e): void {

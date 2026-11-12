@@ -2,6 +2,8 @@ CREATE TABLE IF NOT EXISTS admins (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(120) NOT NULL,
   username VARCHAR(60) NOT NULL,
+  role ENUM('superadmin','administrator','staff') NOT NULL DEFAULT 'staff',
+  permissions JSON NULL,
   password_hash VARCHAR(255) NOT NULL,
   is_active TINYINT(1) NOT NULL DEFAULT 1,
   last_login_at DATETIME NULL,
@@ -23,9 +25,17 @@ CREATE TABLE IF NOT EXISTS members (
   partner2_address VARCHAR(500) NULL,
   partner3_address VARCHAR(500) NULL,
   licence_f20 VARCHAR(40) NULL,
+  licence_f20_expires DATE NULL,
+  licence_f20_image VARCHAR(255) NULL,
   licence_f20c VARCHAR(40) NULL,
+  licence_f20c_expires DATE NULL,
+  licence_f20c_image VARCHAR(255) NULL,
   licence_f21 VARCHAR(40) NULL,
+  licence_f21_expires DATE NULL,
+  licence_f21_image VARCHAR(255) NULL,
   licence_f21b VARCHAR(40) NULL,
+  licence_f21b_expires DATE NULL,
+  licence_f21b_image VARCHAR(255) NULL,
   drug_licence_no VARCHAR(40) NULL,
   qualified_person_name VARCHAR(120) NOT NULL DEFAULT '',
   pharmacist_reg_no VARCHAR(40) NULL,
@@ -36,6 +46,7 @@ CREATE TABLE IF NOT EXISTS members (
   qualified_person2_address VARCHAR(500) NULL,
   qualified_person2_phone VARCHAR(20) NULL,
   photo_path VARCHAR(255) NULL,
+  office_bearers JSON NULL,
   status ENUM('pending','approved','rejected','blocked','deactivated') NOT NULL DEFAULT 'pending',
   last_login_at DATETIME NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -47,6 +58,19 @@ CREATE TABLE IF NOT EXISTS members (
   UNIQUE KEY uq_members_f21 (licence_f21),
   UNIQUE KEY uq_members_f21b (licence_f21b),
   KEY idx_members_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS member_licence_history (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  member_id INT UNSIGNED NOT NULL,
+  form_code ENUM('f20','f20c','f21','f21b') NOT NULL,
+  licence_no VARCHAR(40) NOT NULL,
+  expires_on DATE NULL,
+  image_path VARCHAR(255) NULL,
+  status ENUM('updated','removed') NOT NULL DEFAULT 'updated',
+  replaced_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_member_licence_history_member (member_id, replaced_at),
+  CONSTRAINT fk_member_licence_history_member FOREIGN KEY (member_id) REFERENCES members (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS api_tokens (
@@ -182,5 +206,6 @@ CREATE TABLE IF NOT EXISTS settings (
   support_email VARCHAR(160) NOT NULL DEFAULT '',
   address VARCHAR(500) NOT NULL DEFAULT '',
   office_hours VARCHAR(255) NOT NULL DEFAULT '',
+  office_bearers JSON NULL,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

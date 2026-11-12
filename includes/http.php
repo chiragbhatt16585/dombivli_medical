@@ -208,16 +208,17 @@ function store_upload(string $field, string $folder): ?string
     if (($file['size'] ?? 0) > 5 * 1024 * 1024) {
         json_error('File must be under 5 MB.', 422);
     }
-    $ext = upload_extension((string) $file['tmp_name'], $folder === 'complaints');
+    $allowPdf = in_array($folder, ['complaints', 'licences'], true);
+    $ext = upload_extension((string) $file['tmp_name'], $allowPdf);
     if ($ext === null) {
         json_error(
-            $folder === 'complaints'
+            $allowPdf
                 ? 'Upload a JPG, PNG, WEBP, GIF, or PDF.'
                 : 'Upload a JPG, PNG, WEBP, or GIF image.',
             422
         );
     }
-    if (!in_array($folder, ['flyers', 'complaints', 'branding', 'members'], true)) {
+    if (!in_array($folder, ['flyers', 'complaints', 'branding', 'members', 'licences'], true)) {
         json_error('Invalid upload folder.', 500);
     }
     $name = bin2hex(random_bytes(16)) . '.' . $ext;
@@ -260,7 +261,7 @@ function delete_upload(?string $path): void
     if ($path === null || $path === '') {
         return;
     }
-    if (!preg_match('#^uploads/(flyers|complaints|branding|members)/[A-Za-z0-9]+\.(jpg|png|webp|gif|pdf)$#', $path)) {
+    if (!preg_match('#^uploads/(flyers|complaints|branding|members|licences)/[A-Za-z0-9]+\.(jpg|png|webp|gif|pdf)$#', $path)) {
         return;
     }
     $full = base_path($path);
@@ -301,12 +302,113 @@ function association_payload(?array $row = null): array
         'support_email' => (string) ($row['support_email'] ?? ''),
         'address' => (string) ($row['address'] ?? ''),
         'office_hours' => (string) ($row['office_hours'] ?? ''),
+        'office_bearers' => office_bearers_from_stored($row['office_bearers'] ?? null),
     ];
 }
 
-function member_payload(array $row): array
+function office_bearer_defaults(): array
 {
     return [
+        'president' => ['name' => 'Mr. DILIP DESHMUKH', 'title' => 'President - DMCWA', 'mobile' => '9702400111'],
+        'secretary' => ['name' => 'Mr. MILIND DAHIVADKAR', 'title' => 'Hon. Gen. Secretary - DMCWA', 'mobile' => '9594381944'],
+        'treasurer' => ['name' => 'Mr. REWASHANKAR GOMTIWAL', 'title' => 'Treasurer - DMCWA', 'mobile' => '9820695709'],
+        'zonal' => ['name' => '', 'title' => 'Zonal Leader', 'mobile' => ''],
+    ];
+}
+
+function office_bearers_from_stored(mixed $raw): array
+{
+    $defaults = office_bearer_defaults();
+    $decoded = null;
+    if (is_array($raw)) {
+        $decoded = $raw;
+    } elseif (is_string($raw) && trim($raw) !== '') {
+        $parsed = json_decode($raw, true);
+        $decoded = is_array($parsed) ? $parsed : null;
+    }
+    if ($decoded === null) {
+        return $defaults;
+    }
+    $out = [];
+    foreach ($defaults as $key => $fallback) {
+        $item = isset($decoded[$key]) && is_array($decoded[$key]) ? $decoded[$key] : [];
+        $out[$key] = [
+            'name' => trim((string) ($item['name'] ?? '')),
+            'title' => trim((string) ($item['title'] ?? $fallback['title'])),
+            'mobile' => trim((string) ($item['mobile'] ?? '')),
+        ];
+    }
+    return $out;
+}
+
+function current_office_bearers(): array
+{
+    return office_bearers_from_stored(association_row()['office_bearers'] ?? null);
+}
+
+function member_office_bearers(array $member): array
+{
+    $raw = $member['office_bearers'] ?? null;
+    if ($raw === null || $raw === '') {
+        return office_bearer_defaults();
+    }
+    return office_bearers_from_stored($raw);
+}
+
+function office_bearers_json(): string
+{
+    return json_encode(current_office_bearers(), JSON_UNESCAPED_UNICODE);
+}
+
+function licence_forms(): array
+{
+    return [
+        'f20' => ['label' => 'Form 20 – Retail Allopathic', 'number' => 'licence_f20', 'expires' => 'licence_f20_expires', 'image' => 'licence_f20_image', 'file' => 'licence_f20_file'],
+        'f20c' => ['label' => 'Form 20C – Homoeopathic Retail', 'number' => 'licence_f20c', 'expires' => 'licence_f20c_expires', 'image' => 'licence_f20c_image', 'file' => 'licence_f20c_file'],
+        'f21' => ['label' => 'Form 21 – Retail Schedule C/C(1)', 'number' => 'licence_f21', 'expires' => 'licence_f21_expires', 'image' => 'licence_f21_image', 'file' => 'licence_f21_file'],
+        'f21b' => ['label' => 'Form 21B – Wholesale Schedule C/C(1)', 'number' => 'licence_f21b', 'expires' => 'licence_f21b_expires', 'image' => 'licence_f21b_image', 'file' => 'licence_f21b_file'],
+    ];
+}
+
+function stored_licence(mixed $value): ?string
+{
+    $text = strtoupper(trim((string) $value));
+    return $text === '' ? null : $text;
+}
+
+function stored_date(mixed $value): ?string
+{
+    $text = substr(trim((string) $value), 0, 10);
+    return $text === '' ? null : $text;
+}
+
+function member_licence_history(int $memberId): array
+{
+    $stmt = db()->prepare(
+        'SELECT * FROM member_licence_history WHERE member_id = ? ORDER BY replaced_at DESC, id DESC'
+    );
+    $stmt->execute([$memberId]);
+    $forms = licence_forms();
+    return array_map(static function (array $row) use ($forms): array {
+        $code = (string) $row['form_code'];
+        $status = (string) $row['status'];
+        return [
+            'id' => (int) $row['id'],
+            'form_code' => $code,
+            'form_label' => $forms[$code]['label'] ?? $code,
+            'licence_no' => (string) $row['licence_no'],
+            'expires_on' => stored_date($row['expires_on'] ?? null),
+            'image_url' => media_url($row['image_path'] ?? null),
+            'status' => $status,
+            'status_label' => $status === 'removed' ? 'Removed' : 'Updated',
+            'replaced_at' => $row['replaced_at'],
+        ];
+    }, $stmt->fetchAll());
+}
+
+function member_payload(array $row, bool $withHistory = false): array
+{
+    $payload = [
         'id' => (int) $row['id'],
         'owner_name' => (string) $row['owner_name'],
         'shop_name' => (string) $row['shop_name'],
@@ -319,9 +421,17 @@ function member_payload(array $row): array
         'partner2_address' => member_text($row, 'partner2_address'),
         'partner3_address' => member_text($row, 'partner3_address'),
         'licence_f20' => member_text($row, 'licence_f20'),
+        'licence_f20_expires' => member_text($row, 'licence_f20_expires') !== '' ? stored_date($row['licence_f20_expires'] ?? null) : '',
+        'licence_f20_url' => media_url($row['licence_f20_image'] ?? null),
         'licence_f20c' => member_text($row, 'licence_f20c'),
+        'licence_f20c_expires' => member_text($row, 'licence_f20c_expires') !== '' ? stored_date($row['licence_f20c_expires'] ?? null) : '',
+        'licence_f20c_url' => media_url($row['licence_f20c_image'] ?? null),
         'licence_f21' => member_text($row, 'licence_f21'),
+        'licence_f21_expires' => member_text($row, 'licence_f21_expires') !== '' ? stored_date($row['licence_f21_expires'] ?? null) : '',
+        'licence_f21_url' => media_url($row['licence_f21_image'] ?? null),
         'licence_f21b' => member_text($row, 'licence_f21b'),
+        'licence_f21b_expires' => member_text($row, 'licence_f21b_expires') !== '' ? stored_date($row['licence_f21b_expires'] ?? null) : '',
+        'licence_f21b_url' => media_url($row['licence_f21b_image'] ?? null),
         'drug_licence_no' => member_text($row, 'drug_licence_no'),
         'details_complete' => trim((string) ($row['shop_name'] ?? '')) !== ''
             && trim((string) ($row['drug_licence_no'] ?? '')) !== ''
@@ -340,6 +450,10 @@ function member_payload(array $row): array
         'created_at' => $row['created_at'],
         'updated_at' => $row['updated_at'] ?? null,
     ];
+    if ($withHistory) {
+        $payload['licence_history'] = member_licence_history((int) $row['id']);
+    }
+    return $payload;
 }
 
 function member_text(array $row, string $key): string
@@ -353,6 +467,9 @@ function admin_payload(array $row): array
         'id' => (int) $row['id'],
         'name' => (string) $row['name'],
         'username' => (string) $row['username'],
+        'role' => (string) ($row['role'] ?? 'staff'),
+        'permissions' => admin_permission_keys($row),
+        'is_active' => (bool) ($row['is_active'] ?? 1),
         'last_login_at' => $row['last_login_at'],
     ];
 }

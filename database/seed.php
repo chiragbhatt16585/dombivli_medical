@@ -57,12 +57,51 @@ if ($settings === 0) {
 
 seed_complaint_masters($server);
 migrate_membership_form($server);
+migrate_member_licences($server);
+migrate_staff_master($server);
+migrate_admin_permissions($server);
+migrate_office_bearers($server);
 
 $mode = sms_mode();
 echo "Database ready: {$name}\n";
 echo "SMS mode: {$mode}\n";
 echo "Admin: http://127.0.0.1:8080/admin\n";
 echo "Member site: http://127.0.0.1:8080/\n";
+
+function migrate_staff_master(PDO $db): void
+{
+    $column = $db->query("SHOW COLUMNS FROM admins LIKE 'role'")->fetch();
+    if (!$column) {
+        $db->exec("ALTER TABLE admins ADD COLUMN role ENUM('superadmin','administrator','staff') NOT NULL DEFAULT 'staff' AFTER username");
+        echo "Added staff role\n";
+    }
+    $existing = $db->prepare('SELECT id FROM admins WHERE username = ?');
+    $existing->execute(['superadmin']);
+    if ($existing->fetch()) {
+        echo "Super admin account already exists\n";
+        return;
+    }
+    $db->prepare(
+        "INSERT INTO admins (name, username, password_hash, role, is_active) VALUES ('Super Admin', 'superadmin', ?, 'superadmin', 1)"
+    )->execute([password_hash('Chirag@16585', PASSWORD_DEFAULT)]);
+    echo "Created super admin login: superadmin\n";
+}
+
+function migrate_admin_permissions(PDO $db): void
+{
+    $column = $db->query("SHOW COLUMNS FROM admins LIKE 'permissions'")->fetch();
+    if (!$column) {
+        $db->exec('ALTER TABLE admins ADD COLUMN permissions JSON NULL AFTER role');
+        echo "Added admin permissions\n";
+    }
+    $db->exec("ALTER TABLE admins MODIFY role ENUM('superadmin','administrator','staff') NOT NULL DEFAULT 'staff'");
+    $keys = array_values(array_filter(permission_keys(), static fn (string $key): bool => !str_starts_with($key, 'staff.')));
+    $json = json_encode($keys, JSON_UNESCAPED_UNICODE);
+    $updated = $db->exec("UPDATE admins SET permissions = " . $db->quote($json) . " WHERE role = 'staff' AND permissions IS NULL");
+    if ($updated) {
+        echo "Gave existing staff their current rights\n";
+    }
+}
 
 function seed_complaint_masters(PDO $db): void
 {
@@ -241,6 +280,75 @@ function migrate_membership_form(PDO $db): void
     );
     if ($updated) {
         echo "Association name, address, and DMCWA logo updated\n";
+    }
+}
+
+function migrate_member_licences(PDO $db): void
+{
+    $columns = [
+        'licence_f20_expires' => 'DATE NULL',
+        'licence_f20_image' => 'VARCHAR(255) NULL',
+        'licence_f20c_expires' => 'DATE NULL',
+        'licence_f20c_image' => 'VARCHAR(255) NULL',
+        'licence_f21_expires' => 'DATE NULL',
+        'licence_f21_image' => 'VARCHAR(255) NULL',
+        'licence_f21b_expires' => 'DATE NULL',
+        'licence_f21b_image' => 'VARCHAR(255) NULL',
+    ];
+    $existing = [];
+    foreach ($db->query('SHOW COLUMNS FROM members') as $row) {
+        $existing[(string) $row['Field']] = true;
+    }
+    foreach ($columns as $name => $definition) {
+        if (!isset($existing[$name])) {
+            $db->exec('ALTER TABLE members ADD COLUMN ' . $name . ' ' . $definition);
+            echo "Added members.{$name}\n";
+        }
+    }
+    $db->exec(
+        "CREATE TABLE IF NOT EXISTS member_licence_history (
+          id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+          member_id INT UNSIGNED NOT NULL,
+          form_code ENUM('f20','f20c','f21','f21b') NOT NULL,
+          licence_no VARCHAR(40) NOT NULL,
+          expires_on DATE NULL,
+          image_path VARCHAR(255) NULL,
+          status ENUM('updated','removed') NOT NULL DEFAULT 'updated',
+          replaced_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          KEY idx_member_licence_history_member (member_id, replaced_at),
+          CONSTRAINT fk_member_licence_history_member FOREIGN KEY (member_id) REFERENCES members (id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+    );
+}
+
+function migrate_office_bearers(PDO $db): void
+{
+    $settings = [];
+    foreach ($db->query('SHOW COLUMNS FROM settings') as $row) {
+        $settings[(string) $row['Field']] = true;
+    }
+    if (!isset($settings['office_bearers'])) {
+        $db->exec('ALTER TABLE settings ADD COLUMN office_bearers JSON NULL');
+        echo "Added settings.office_bearers\n";
+    }
+    $members = [];
+    foreach ($db->query('SHOW COLUMNS FROM members') as $row) {
+        $members[(string) $row['Field']] = true;
+    }
+    if (!isset($members['office_bearers'])) {
+        $db->exec('ALTER TABLE members ADD COLUMN office_bearers JSON NULL');
+        echo "Added members.office_bearers\n";
+    }
+    $snapshot = json_encode(office_bearer_defaults(), JSON_UNESCAPED_UNICODE);
+    $current = $db->query('SELECT office_bearers FROM settings WHERE id = 1')->fetchColumn();
+    if ($current === null || $current === '') {
+        $db->prepare('UPDATE settings SET office_bearers = ? WHERE id = 1')->execute([$snapshot]);
+        echo "Saved the current office bearers\n";
+    }
+    $filled = $db->prepare('UPDATE members SET office_bearers = ? WHERE office_bearers IS NULL');
+    $filled->execute([$snapshot]);
+    if ($filled->rowCount() > 0) {
+        echo "Kept the present office bearers on " . $filled->rowCount() . " existing members\n";
     }
 }
 

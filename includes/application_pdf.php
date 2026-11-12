@@ -57,6 +57,17 @@ function application_pdf_html(array $member, array $settings): string
         }
         return '<span class="filled">' . $e($text) . '</span>';
     };
+    $licenceRow = static function (string $label, string $key) use ($member, $e): string {
+        $number = trim((string) ($member[$key] ?? ''));
+        $expires = substr(trim((string) ($member[$key . '_expires'] ?? '')), 0, 10);
+        $till = '';
+        if ($number !== '' && $expires !== '') {
+            $when = strtotime($expires);
+            $till = 'Valid till ' . ($when ? date('d M Y', $when) : $expires);
+        }
+        $value = $number !== '' ? $e($number) : '&nbsp;';
+        return '<tr><td class="name">' . $e($label) . '</td><td class="no">' . $value . '</td><td class="till">' . $e($till) . '</td></tr>';
+    };
     $created = strtotime((string) ($member['created_at'] ?? '')) ?: time();
     $date = date('d / m / Y', $created);
     $logo = pdf_image_uri($settings['logo_path'] ?? null);
@@ -68,6 +79,34 @@ function application_pdf_html(array $member, array $settings): string
     $address = trim((string) ($settings['address'] ?? ''));
     if ($address === '') {
         $address = 'Vishwambhar Darshan, A Wing, Block No. 1 & 2, Subhash Road, Vishnu Nagar, Dombivali (West), Dist. Thane';
+    }
+    $bearers = member_office_bearers($member);
+    $signCell = static function (array $person) use ($e): string {
+        $html = '<td><div class="sign-space"></div>';
+        if ($person['name'] !== '') {
+            $html .= '<strong>' . $e($person['name']) . '</strong><br>';
+        }
+        if ($person['title'] !== '') {
+            $html .= $e($person['title']);
+        }
+        if ($person['mobile'] !== '') {
+            $html .= '<br>Mob. ' . $e($person['mobile']);
+        }
+        return $html . '</td>';
+    };
+    $zonal = $bearers['zonal'];
+    $zonalHtml = 'ZONAL LEADER';
+    if ($zonal['name'] !== '' || $zonal['mobile'] !== '') {
+        $zonalHtml = 'ZONAL LEADER<br>';
+        if ($zonal['name'] !== '') {
+            $zonalHtml .= '<strong>' . $e($zonal['name']) . '</strong><br>';
+        }
+        if ($zonal['title'] !== '' && strcasecmp($zonal['title'], 'Zonal Leader') !== 0) {
+            $zonalHtml .= $e($zonal['title']) . '<br>';
+        }
+        if ($zonal['mobile'] !== '') {
+            $zonalHtml .= 'Mob. ' . $e($zonal['mobile']);
+        }
     }
 
     return '<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
@@ -91,6 +130,11 @@ function application_pdf_html(array $member, array $settings): string
       .filled { border-bottom: 1px solid #222; padding: 0 2px 1px; }
       .blank { display: inline-block; border-bottom: 1px solid #222; min-width: 220px; height: 12px; }
       .pair td { width: 50%; padding: 1px 8px 1px 0; }
+      .licences { width: 100%; margin: 0 0 4px; }
+      .licences td { vertical-align: top; padding: 1px 8px 4px 0; }
+      .licences .name { width: 48%; font-weight: bold; }
+      .licences .no { width: 27%; border-bottom: 1px solid #222; }
+      .licences .till { width: 25%; }
       .decl { font-size: 8px; line-height: 1.35; margin: 8px 0 6px; }
       .signs td { width: 25%; font-size: 7.5px; line-height: 1.3; padding-right: 6px; }
       .sign-space { height: 28px; }
@@ -128,13 +172,12 @@ function application_pdf_html(array $member, array $settings): string
     <div class="row">3) ' . $line($member['partner3_address'] ?? '') . '</div>
     <div class="row"><span class="label">5. Mobile Number Firm:</span> ' . $line($member['mobile'] ?? '') . ' &nbsp;&nbsp; <span class="label">Mail id:</span> ' . $line($member['email'] ?? '') . '</div>
     <div class="row"><span class="label">6. Drug Licence No.</span></div>
-    <table class="pair"><tr>
-      <td>F20 ' . $line($member['licence_f20'] ?? '') . '</td>
-      <td>F20C ' . $line($member['licence_f20c'] ?? '') . '</td>
-    </tr><tr>
-      <td>F21 ' . $line($member['licence_f21'] ?? '') . '</td>
-      <td>F21B ' . $line($member['licence_f21b'] ?? '') . '</td>
-    </tr></table>
+    <table class="licences">
+      ' . $licenceRow('Form 20 – Retail Allopathic', 'licence_f20') . '
+      ' . $licenceRow('Form 20C – Homoeopathic Retail', 'licence_f20c') . '
+      ' . $licenceRow('Form 21 – Retail Schedule C/C(1)', 'licence_f21') . '
+      ' . $licenceRow('Form 21B – Wholesale Schedule C/C(1)', 'licence_f21b') . '
+    </table>
     <div class="row"><span class="label">7. Name of The Qualified Person:</span></div>
     <div class="row">1) ' . $line($member['qualified_person_name'] ?? '') . ' &nbsp; Reg. No. ' . $line($member['pharmacist_reg_no'] ?? '') . '</div>
     <div class="row">2) ' . $line($member['qualified_person2_name'] ?? '') . ' &nbsp; Reg. No. ' . $line($member['qualified_person2_reg'] ?? '') . '</div>
@@ -148,10 +191,10 @@ function application_pdf_html(array $member, array $settings): string
       D) I / We request you to sanction my / our application.
     </div>
     <table class="signs"><tr>
-      <td><div class="sign-space"></div><strong>Mr. DILIP DESHMUKH</strong><br>President - DMCWA<br>Mob. 9702400111</td>
-      <td><div class="sign-space"></div><strong>Mr. MILIND DAHIVADKAR</strong><br>Hon. Gen. Secretary - DMCWA<br>Mob. 9594381944</td>
-      <td><div class="sign-space"></div><strong>Mr. REWASHANKAR GOMTIWAL</strong><br>Treasurer - DMCWA<br>Mob. 9820695709</td>
-      <td class="yours"><div class="sign-space"></div>Yours faithfully,<br>' . $e($member['owner_name'] ?? '') . '<br>(Proprietor/Partner)<br><br>ZONAL LEADER</td>
+      ' . $signCell($bearers['president']) . '
+      ' . $signCell($bearers['secretary']) . '
+      ' . $signCell($bearers['treasurer']) . '
+      <td class="yours"><div class="sign-space"></div>Yours faithfully,<br>' . $e($member['owner_name'] ?? '') . '<br>(Proprietor/Partner)<br><br>' . $zonalHtml . '</td>
     </tr></table>
     <div class="foot"><strong>Enclosed:</strong> Xerox Copies of Drug Licence &amp; Qualified Person Certificate, Shop Agreement, Photo Copy, Residential Address Proof, Passport size Photo of Shop Owner.</div>
     </body></html>';

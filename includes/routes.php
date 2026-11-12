@@ -152,10 +152,10 @@ function auth_register(): void
 
     try {
         $stmt = db()->prepare(
-            'INSERT INTO members (owner_name, shop_name, mobile, email, address, drug_licence_no, status, last_login_at)
-             VALUES (?, "", ?, ?, "", NULL, "pending", NOW())'
+            'INSERT INTO members (owner_name, shop_name, mobile, email, address, drug_licence_no, office_bearers, status, last_login_at)
+             VALUES (?, "", ?, ?, "", NULL, ?, "pending", NOW())'
         );
-        $stmt->execute([$name, $mobile, $email]);
+        $stmt->execute([$name, $mobile, $email, office_bearers_json()]);
         $id = (int) db()->lastInsertId();
     } catch (PDOException $e) {
         member_write_error($e);
@@ -182,7 +182,7 @@ function auth_logout(): void
 
 function member_me(): void
 {
-    json_ok(member_payload(require_member()));
+    json_ok(member_payload(require_member(), true));
 }
 
 function member_application_pdf(): void
@@ -203,7 +203,7 @@ function member_update(): void
     save_member_photo((int) $member['id'], $member['photo_path'] ?? null, false);
     $stmt = db()->prepare('SELECT * FROM members WHERE id = ?');
     $stmt->execute([(int) $member['id']]);
-    json_ok(member_payload($stmt->fetch()));
+    json_ok(member_payload($stmt->fetch(), true));
 }
 
 function member_complaints(): void
@@ -320,15 +320,170 @@ function admin_login(): void
     db()->prepare('UPDATE admins SET last_login_at = NOW() WHERE id = ?')->execute([(int) $admin['id']]);
     $admin['last_login_at'] = date('Y-m-d H:i:s');
     $token = issue_token('admin', (int) $admin['id'], null, 7 * 24 * 3600);
+    $payload = admin_payload($admin);
+    $payload['permission_catalog'] = permission_catalog();
     json_ok([
         'token' => $token,
-        'admin' => admin_payload($admin),
+        'admin' => $payload,
     ]);
 }
 
 function admin_me(): void
 {
-    json_ok(admin_payload(require_admin()));
+    $payload = admin_payload(require_admin());
+    $payload['permission_catalog'] = permission_catalog();
+    json_ok($payload);
+}
+
+function admin_staff_list(): void
+{
+    require_any_permission(['staff.view', 'staff.manage']);
+    $rows = db()->query('SELECT * FROM admins ORDER BY id ASC')->fetchAll();
+    json_ok(array_map('admin_payload', $rows));
+}
+
+function admin_staff_create(): void
+{
+    $actor = require_permission('staff.manage');
+    $in = request_json();
+    $fields = staff_fields($in, true, null);
+    guard_staff_change($actor, null, $fields);
+    try {
+        db()->prepare(
+            'INSERT INTO admins (name, username, password_hash, role, permissions, is_active) VALUES (?, ?, ?, ?, ?, ?)'
+        )->execute([
+            $fields['name'],
+            $fields['username'],
+            password_hash($fields['password'], PASSWORD_DEFAULT),
+            $fields['role'],
+            $fields['permissions_json'],
+            $fields['is_active'],
+        ]);
+    } catch (PDOException $e) {
+        if (is_duplicate($e, 'uq_admins_username')) {
+            json_error('That username is already used.', 422);
+        }
+        throw $e;
+    }
+    json_ok(admin_payload(staff_row((int) db()->lastInsertId())), 201);
+}
+
+function admin_staff_update(int $id): void
+{
+    $actor = require_permission('staff.manage');
+    $existing = staff_row($id);
+    $in = request_json();
+    $fields = staff_fields($in, false, $existing);
+    guard_staff_change($actor, $existing, $fields);
+    try {
+        if ($fields['password'] !== '') {
+            db()->prepare(
+                'UPDATE admins SET name = ?, username = ?, password_hash = ?, role = ?, permissions = ?, is_active = ? WHERE id = ?'
+            )->execute([
+                $fields['name'],
+                $fields['username'],
+                password_hash($fields['password'], PASSWORD_DEFAULT),
+                $fields['role'],
+                $fields['permissions_json'],
+                $fields['is_active'],
+                $id,
+            ]);
+        } else {
+            db()->prepare(
+                'UPDATE admins SET name = ?, username = ?, role = ?, permissions = ?, is_active = ? WHERE id = ?'
+            )->execute([
+                $fields['name'],
+                $fields['username'],
+                $fields['role'],
+                $fields['permissions_json'],
+                $fields['is_active'],
+                $id,
+            ]);
+        }
+    } catch (PDOException $e) {
+        if (is_duplicate($e, 'uq_admins_username')) {
+            json_error('That username is already used.', 422);
+        }
+        throw $e;
+    }
+    json_ok(admin_payload(staff_row($id)));
+}
+
+function staff_row(int $id): array
+{
+    $stmt = db()->prepare('SELECT * FROM admins WHERE id = ? LIMIT 1');
+    $stmt->execute([$id]);
+    $row = $stmt->fetch();
+    if (!$row) {
+        json_error('Staff member not found.', 404);
+    }
+    return $row;
+}
+
+function staff_fields(array $in, bool $create, ?array $existing): array
+{
+    $username = strtolower(trim((string) ($in['username'] ?? '')));
+    if (!preg_match('/^[a-z][a-z0-9._]{2,59}$/', $username)) {
+        json_error('Username must be 3 to 60 letters, numbers, dots, or underscores.', 422);
+    }
+    $role = (string) ($in['role'] ?? ($existing['role'] ?? 'staff'));
+    if (!in_array($role, ['superadmin', 'administrator', 'staff'], true)) {
+        json_error('Choose Staff, Administrator, or Super admin.', 422);
+    }
+    $password = (string) ($in['password'] ?? '');
+    if ($create || $password !== '') {
+        if (strlen($password) < 8 || strlen($password) > 72) {
+            json_error('Password must be 8 to 72 characters.', 422);
+        }
+    }
+    $permissionKeys = permission_keys_from_input($in);
+    return [
+        'name' => bounded_string($in['name'] ?? '', 'Name', 2, 120),
+        'username' => $username,
+        'password' => $password,
+        'role' => $role,
+        'permission_keys' => $permissionKeys,
+        'permissions_json' => staff_permission_json($role, $permissionKeys),
+        'is_active' => flag_value($in['is_active'] ?? '1', true),
+    ];
+}
+
+function guard_staff_change(array $actor, ?array $existing, array $fields): void
+{
+    if ($fields['role'] === 'superadmin' && ($actor['role'] ?? '') !== 'superadmin') {
+        json_error('Only a super admin can assign that role.', 403);
+    }
+    if ($fields['role'] === 'administrator' && !in_array((string) ($actor['role'] ?? ''), ['superadmin', 'administrator'], true)) {
+        json_error('Only a super admin or an administrator can assign that role.', 403);
+    }
+    if ($existing && ($existing['role'] ?? '') === 'superadmin' && ($actor['role'] ?? '') !== 'superadmin') {
+        json_error('Only a super admin can change a super admin account.', 403);
+    }
+    if ($existing && ($existing['role'] ?? '') === 'administrator' && !in_array((string) ($actor['role'] ?? ''), ['superadmin', 'administrator'], true)) {
+        json_error('Only a super admin or an administrator can change an administrator account.', 403);
+    }
+    if ($fields['role'] === 'staff') {
+        foreach ($fields['permission_keys'] as $key) {
+            if (!admin_can($actor, $key)) {
+                json_error('You can only give rights that your account already has.', 422);
+            }
+        }
+    }
+    if ($existing && (int) $actor['id'] === (int) $existing['id'] && !$fields['is_active']) {
+        json_error('You cannot deactivate your own account.', 422);
+    }
+    if (!$existing) {
+        return;
+    }
+    $wasSuper = (string) $existing['role'] === 'superadmin' && (int) $existing['is_active'] === 1;
+    $staysSuper = $fields['role'] === 'superadmin' && $fields['is_active'];
+    if ($wasSuper && !$staysSuper) {
+        $stmt = db()->prepare("SELECT COUNT(*) FROM admins WHERE role = 'superadmin' AND is_active = 1 AND id <> ?");
+        $stmt->execute([(int) $existing['id']]);
+        if ((int) $stmt->fetchColumn() === 0) {
+            json_error('Keep at least one active super admin.', 422);
+        }
+    }
 }
 
 function admin_password(): void
@@ -352,7 +507,10 @@ function admin_password(): void
 
 function admin_dashboard(): void
 {
-    require_admin();
+    $admin = require_permission('dashboard.view');
+    $members = admin_can($admin, 'members.view');
+    $complaintsAllowed = admin_can($admin, 'complaints.view');
+    $flyers = admin_can($admin, 'flyers.view');
     $counts = [
         'members' => (int) db()->query('SELECT COUNT(*) FROM members')->fetchColumn(),
         'pending_members' => (int) db()->query("SELECT COUNT(*) FROM members WHERE status = 'pending'")->fetchColumn(),
@@ -376,18 +534,28 @@ function admin_dashboard(): void
          LIMIT 8"
     )->fetchAll();
     json_ok([
-        'counts' => $counts,
-        'pending_members' => array_map('member_payload', $pending),
-        'open_complaints' => array_map(
+        'access' => [
+            'members' => $members,
+            'complaints' => $complaintsAllowed,
+            'flyers' => $flyers,
+        ],
+        'counts' => [
+            'members' => $members ? $counts['members'] : 0,
+            'pending_members' => $members ? $counts['pending_members'] : 0,
+            'open_complaints' => $complaintsAllowed ? $counts['open_complaints'] : 0,
+            'active_flyers' => $flyers ? $counts['active_flyers'] : 0,
+        ],
+        'pending_members' => $members ? array_map('member_payload', $pending) : [],
+        'open_complaints' => $complaintsAllowed ? array_map(
             static fn (array $row): array => complaint_payload($row, true),
             $complaints
-        ),
+        ) : [],
     ]);
 }
 
 function admin_members(): void
 {
-    require_admin();
+    require_any_permission(['members.view', 'members.edit', 'members.status', 'members.deactivate', 'members.pdf']);
     $status = (string) ($_GET['status'] ?? '');
     $q = trim((string) ($_GET['q'] ?? ''));
     $sql = 'SELECT * FROM members WHERE 1 = 1';
@@ -399,9 +567,13 @@ function admin_members(): void
     if ($q !== '') {
         $sql .= ' AND (owner_name LIKE ? OR shop_name LIKE ? OR mobile LIKE ? OR drug_licence_no LIKE ?
             OR licence_f20 LIKE ? OR licence_f20c LIKE ? OR licence_f21 LIKE ? OR licence_f21b LIKE ?
-            OR qualified_person_name LIKE ?)';
+            OR qualified_person_name LIKE ?
+            OR EXISTS (
+                SELECT 1 FROM member_licence_history h
+                WHERE h.member_id = members.id AND h.licence_no LIKE ?
+            ))';
         $like = '%' . $q . '%';
-        array_push($params, $like, $like, $like, $like, $like, $like, $like, $like, $like);
+        array_push($params, $like, $like, $like, $like, $like, $like, $like, $like, $like, $like);
     }
     $sql .= ' ORDER BY created_at DESC LIMIT 200';
     $stmt = db()->prepare($sql);
@@ -411,39 +583,44 @@ function admin_members(): void
 
 function admin_member_create(): void
 {
-    require_admin();
+    require_permission('members.create');
     $in = input();
     $mobile = require_mobile($in);
-    $profile = member_profile_from_input($in, true);
+    $profile = member_profile_from_input($in, true, null);
+    $images = prepare_licence_images(null, $profile);
+    $profile = array_merge($profile, $images['columns']);
     $photo = store_upload('photo', 'members');
     try {
         $id = insert_member($profile, $mobile, 'approved', $photo, false);
     } catch (PDOException $e) {
         delete_upload($photo);
+        foreach ($images['created'] as $path) {
+            delete_upload($path);
+        }
         member_write_error($e);
         throw $e;
     }
     $row = db()->prepare('SELECT * FROM members WHERE id = ?');
     $row->execute([$id]);
-    json_ok(member_payload($row->fetch()), 201);
+    json_ok(member_payload($row->fetch(), true), 201);
 }
 
 function admin_member_show(int $id): void
 {
-    require_admin();
+    require_any_permission(['members.view', 'members.edit', 'members.status', 'members.deactivate', 'members.pdf']);
     $stmt = db()->prepare('SELECT * FROM members WHERE id = ? LIMIT 1');
     $stmt->execute([$id]);
     $row = $stmt->fetch();
     if (!$row) {
         json_error('Member not found.', 404);
     }
-    json_ok(member_payload($row));
+    json_ok(member_payload($row, true));
 }
 
 function admin_member_application_pdf(int $id): void
 {
     adopt_download_token();
-    require_admin();
+    require_permission('members.pdf');
     $stmt = db()->prepare('SELECT * FROM members WHERE id = ? LIMIT 1');
     $stmt->execute([$id]);
     $row = $stmt->fetch();
@@ -467,7 +644,6 @@ function adopt_download_token(): void
 
 function admin_member_update(int $id): void
 {
-    require_admin();
     $stmt = db()->prepare('SELECT * FROM members WHERE id = ? LIMIT 1');
     $stmt->execute([$id]);
     $existing = $stmt->fetch();
@@ -475,18 +651,27 @@ function admin_member_update(int $id): void
         json_error('Member not found.', 404);
     }
     $in = input();
+    $statusOnly = array_key_exists('status', $in) && count(array_diff(array_keys($in), ['status'])) === 0;
+    if ($statusOnly) {
+        require_permission('members.status');
+    } else {
+        require_permission('members.edit');
+        if (array_key_exists('status', $in) && (string) $in['status'] !== (string) $existing['status']) {
+            require_permission('members.status');
+        }
+    }
     if ($existing['status'] === 'deactivated' && array_key_exists('status', $in) && (string) $in['status'] !== 'deactivated') {
         json_error('A deactivated account cannot sign in again.', 422);
     }
     save_member_fields($id, $in, true);
     save_member_photo($id, $existing['photo_path'] ?? null, false);
     $stmt->execute([$id]);
-    json_ok(member_payload($stmt->fetch()));
+    json_ok(member_payload($stmt->fetch(), true));
 }
 
 function admin_member_deactivate(int $id): void
 {
-    require_admin();
+    require_permission('members.deactivate');
     $stmt = db()->prepare('SELECT * FROM members WHERE id = ? LIMIT 1');
     $stmt->execute([$id]);
     if (!$stmt->fetch()) {
@@ -500,7 +685,7 @@ function admin_member_deactivate(int $id): void
 
 function admin_complaints(): void
 {
-    require_admin();
+    require_any_permission(['complaints.view', 'complaints.update']);
     $status = (string) ($_GET['status'] ?? '');
     $sql = complaint_admin_select() . ' WHERE 1 = 1';
     $params = [];
@@ -519,14 +704,14 @@ function admin_complaints(): void
 
 function admin_complaint_show(int $id): void
 {
-    require_admin();
+    require_any_permission(['complaints.view', 'complaints.update']);
     $row = admin_complaint_row($id);
     json_ok(complaint_payload($row, true));
 }
 
 function admin_complaint_update(int $id): void
 {
-    $admin = require_admin();
+    $admin = require_permission('complaints.update');
     $existing = admin_complaint_row($id);
     $in = request_json();
     $status = (string) ($in['status'] ?? $existing['status']);
@@ -573,14 +758,14 @@ function admin_complaint_update(int $id): void
 
 function admin_complaint_categories(): void
 {
-    require_admin();
+    require_any_permission(['categories.view', 'categories.manage']);
     $rows = db()->query('SELECT * FROM complaint_categories ORDER BY sort_order ASC, id ASC')->fetchAll();
     json_ok(array_map('complaint_category_payload', $rows));
 }
 
 function admin_complaint_category_create(): void
 {
-    require_admin();
+    require_permission('categories.manage');
     $fields = complaint_category_fields(request_json());
     try {
         $stmt = db()->prepare(
@@ -598,7 +783,7 @@ function admin_complaint_category_create(): void
 
 function admin_complaint_category_update(int $id): void
 {
-    require_admin();
+    require_permission('categories.manage');
     complaint_category_row($id);
     $fields = complaint_category_fields(request_json());
     try {
@@ -616,14 +801,14 @@ function admin_complaint_category_update(int $id): void
 
 function admin_complaint_statuses(): void
 {
-    require_admin();
+    require_any_permission(['statuses.view', 'statuses.manage', 'complaints.view', 'complaints.update']);
     $rows = db()->query('SELECT * FROM complaint_statuses ORDER BY sort_order ASC, id ASC')->fetchAll();
     json_ok(array_map('complaint_status_payload', $rows));
 }
 
 function admin_complaint_status_create(): void
 {
-    require_admin();
+    require_permission('statuses.manage');
     $fields = complaint_status_fields(request_json(), true);
     try {
         $stmt = db()->prepare(
@@ -641,7 +826,7 @@ function admin_complaint_status_create(): void
 
 function admin_complaint_status_update(int $id): void
 {
-    require_admin();
+    require_permission('statuses.manage');
     $existing = complaint_status_by_id($id);
     $fields = complaint_status_fields(request_json(), false, $existing);
     if ($existing['code'] === 'submitted' && !$fields['is_active']) {
@@ -655,20 +840,20 @@ function admin_complaint_status_update(int $id): void
 
 function admin_flyers(): void
 {
-    require_admin();
+    require_any_permission(['flyers.view', 'flyers.edit', 'flyers.delete']);
     $rows = db()->query('SELECT * FROM flyers ORDER BY sort_order ASC, id DESC')->fetchAll();
     json_ok(array_map('flyer_payload', $rows));
 }
 
 function admin_flyer_show(int $id): void
 {
-    require_admin();
+    require_any_permission(['flyers.view', 'flyers.edit']);
     json_ok(flyer_payload(admin_flyer_row($id)));
 }
 
 function admin_flyer_create(): void
 {
-    $admin = require_admin();
+    $admin = require_permission('flyers.create');
     $fields = flyer_fields_from_input(input(), true);
     $image = store_upload('image', 'flyers');
     if ($image === null) {
@@ -692,7 +877,7 @@ function admin_flyer_create(): void
 
 function admin_flyer_update(int $id): void
 {
-    require_admin();
+    require_permission('flyers.edit');
     $existing = admin_flyer_row($id);
     $fields = flyer_fields_from_input(input(), false, $existing);
     $image = store_upload('image', 'flyers');
@@ -720,7 +905,7 @@ function admin_flyer_update(int $id): void
 
 function admin_flyer_delete(int $id): void
 {
-    require_admin();
+    require_permission('flyers.delete');
     $existing = admin_flyer_row($id);
     db()->prepare('DELETE FROM flyers WHERE id = ?')->execute([$id]);
     delete_upload((string) $existing['image_path']);
@@ -729,7 +914,7 @@ function admin_flyer_delete(int $id): void
 
 function admin_sms(): void
 {
-    require_admin();
+    require_permission('sms.view');
     $q = trim((string) ($_GET['q'] ?? ''));
     $sql = 'SELECT * FROM sms_messages WHERE 1 = 1';
     $params = [];
@@ -758,7 +943,7 @@ function admin_sms(): void
 
 function admin_settings_get(): void
 {
-    require_admin();
+    require_any_permission(['settings.view', 'settings.edit']);
     json_ok([
         'association' => association_payload(),
         'sms' => sms_status_payload(),
@@ -767,7 +952,7 @@ function admin_settings_get(): void
 
 function admin_settings_save(): void
 {
-    require_admin();
+    require_permission('settings.edit');
     $in = input();
     $name = bounded_string($in['name'] ?? '', 'Site name', 3, 160);
     $tagline = optional_text($in['tagline'] ?? '', 'Tagline', 255);
@@ -777,6 +962,7 @@ function admin_settings_save(): void
     $supportEmail = optional_email($in['support_email'] ?? '');
     $address = optional_text($in['address'] ?? '', 'Address', 500);
     $officeHours = optional_text($in['office_hours'] ?? '', 'Office hours', 255);
+    $officeBearers = office_bearers_from_input($in);
     $current = association_row();
     $logo = store_upload('logo', 'branding');
     $removeLogo = flag_value($in['remove_logo'] ?? '0', false) === 1;
@@ -791,10 +977,40 @@ function admin_settings_save(): void
     db()->prepare(
         'UPDATE settings
          SET association_name = ?, tagline = ?, copyright = ?, logo_path = ?,
-             support_mobile = ?, whatsapp = ?, support_email = ?, address = ?, office_hours = ?
+             support_mobile = ?, whatsapp = ?, support_email = ?, address = ?, office_hours = ?,
+             office_bearers = ?
          WHERE id = 1'
-    )->execute([$name, $tagline, $copyright, $logo, $supportMobile, $whatsapp, $supportEmail, $address, $officeHours]);
+    )->execute([$name, $tagline, $copyright, $logo, $supportMobile, $whatsapp, $supportEmail, $address, $officeHours, $officeBearers]);
     json_ok(association_payload());
+}
+
+function office_bearers_from_input(array $in): string
+{
+    $roles = [
+        'president' => 'President',
+        'secretary' => 'Hon. Gen. Secretary',
+        'treasurer' => 'Treasurer',
+        'zonal' => 'Zonal Leader',
+    ];
+    $out = [];
+    foreach ($roles as $key => $label) {
+        $optional = $key === 'zonal';
+        $name = $optional
+            ? (nullable_string($in[$key . '_name'] ?? '', 120) ?? '')
+            : bounded_string($in[$key . '_name'] ?? '', $label . ' name', 2, 120);
+        $title = $optional
+            ? optional_text($in[$key . '_title'] ?? '', $label . ' designation', 80)
+            : bounded_string($in[$key . '_title'] ?? '', $label . ' designation', 2, 80);
+        if ($optional && $title === '') {
+            $title = 'Zonal Leader';
+        }
+        $out[$key] = [
+            'name' => $name,
+            'title' => $title,
+            'mobile' => optional_phone($in[$key . '_mobile'] ?? '', $label . ' mobile'),
+        ];
+    }
+    return json_encode($out, JSON_UNESCAPED_UNICODE);
 }
 
 function licence_value(mixed $value): ?string
@@ -809,19 +1025,36 @@ function licence_value(mixed $value): ?string
     return $text;
 }
 
-function member_profile_from_input(array $in, bool $required): array
+function member_profile_from_input(array $in, bool $asAdmin, ?array $existing): array
 {
-    unset($required);
-    $licences = [
-        'licence_f20' => licence_value($in['licence_f20'] ?? ''),
-        'licence_f20c' => licence_value($in['licence_f20c'] ?? ''),
-        'licence_f21' => licence_value($in['licence_f21'] ?? ''),
-        'licence_f21b' => licence_value($in['licence_f21b'] ?? ''),
-    ];
+    $locked = !$asAdmin && (($existing['status'] ?? '') === 'approved');
+    $licences = [];
+    foreach (licence_forms() as $form) {
+        $numberKey = $form['number'];
+        $expiresKey = $form['expires'];
+        if (!array_key_exists($numberKey, $in) && $existing !== null) {
+            $number = stored_licence($existing[$numberKey] ?? null);
+        } else {
+            $number = licence_value($in[$numberKey] ?? '');
+        }
+        if (!array_key_exists($expiresKey, $in) && $existing !== null) {
+            $expires = stored_date($existing[$expiresKey] ?? null);
+        } else {
+            $expires = licence_expiry($in[$expiresKey] ?? '', $form['label'], $number !== null && !$locked);
+        }
+        if ($number === null && $expires !== null) {
+            json_error('Enter the ' . $form['label'] . ' number for that expiry date.', 422);
+        }
+        $licences[$numberKey] = $number;
+        $licences[$expiresKey] = $number === null ? null : $expires;
+    }
     if ($licences['licence_f20'] === null && $licences['licence_f20c'] === null && $licences['licence_f21'] === null && $licences['licence_f21b'] === null) {
         $legacy = licence_value($in['drug_licence_no'] ?? '');
         if ($legacy !== null) {
             $licences['licence_f20'] = $legacy;
+            if ($licences['licence_f20_expires'] === null && !$locked) {
+                $licences['licence_f20_expires'] = licence_expiry($in['licence_f20_expires'] ?? '', 'Form 20 – Retail Allopathic', true);
+            }
         }
     }
     $primary = $licences['licence_f20'] ?? $licences['licence_f20c'] ?? $licences['licence_f21'] ?? $licences['licence_f21b'];
@@ -875,9 +1108,13 @@ function member_profile_from_input(array $in, bool $required): array
         'partner2_address' => $partner2Address,
         'partner3_address' => $partner3Address,
         'licence_f20' => $licences['licence_f20'],
+        'licence_f20_expires' => $licences['licence_f20_expires'],
         'licence_f20c' => $licences['licence_f20c'],
+        'licence_f20c_expires' => $licences['licence_f20c_expires'],
         'licence_f21' => $licences['licence_f21'],
+        'licence_f21_expires' => $licences['licence_f21_expires'],
         'licence_f21b' => $licences['licence_f21b'],
+        'licence_f21b_expires' => $licences['licence_f21b_expires'],
         'drug_licence_no' => $primary,
         'qualified_person_name' => bounded_string($qpName, 'Qualified person name', 2, 120),
         'pharmacist_reg_no' => $qpReg,
@@ -890,22 +1127,111 @@ function member_profile_from_input(array $in, bool $required): array
     ];
 }
 
+function licence_expiry(mixed $value, string $label, bool $required): ?string
+{
+    $text = trim((string) $value);
+    if ($text === '') {
+        if ($required) {
+            json_error('Enter the expiry date for ' . $label . '.', 422);
+        }
+        return null;
+    }
+    return optional_date($text, $label . ' expiry');
+}
+
+function licence_file_selected(string $field): bool
+{
+    return isset($_FILES[$field]) && (int) ($_FILES[$field]['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_NO_FILE;
+}
+
 function reject_licence_change(array $member, array $in): void
 {
     if (($member['status'] ?? '') !== 'approved') {
         return;
     }
-    foreach (['licence_f20', 'licence_f20c', 'licence_f21', 'licence_f21b'] as $key) {
-        if (!array_key_exists($key, $in)) {
+    foreach (licence_forms() as $form) {
+        if (array_key_exists($form['number'], $in)) {
+            $next = licence_value($in[$form['number']]);
+            $current = stored_licence($member[$form['number']] ?? null);
+            if ($next !== $current) {
+                json_error('After approval, only the association can change the drug licences.', 422);
+            }
+        }
+        if (array_key_exists($form['expires'], $in)) {
+            $next = licence_expiry($in[$form['expires']], $form['label'], false);
+            $current = stored_date($member[$form['expires']] ?? null);
+            if ($next !== $current) {
+                json_error('After approval, only the association can change the drug licences.', 422);
+            }
+        }
+        if (licence_file_selected($form['file'])) {
+            json_error('After approval, only the association can change the drug licences.', 422);
+        }
+    }
+}
+
+function prepare_licence_images(?array $existing, array $profile): array
+{
+    foreach (licence_forms() as $form) {
+        if (licence_file_selected($form['file']) && $profile[$form['number']] === null) {
+            json_error('Enter the ' . $form['label'] . ' number before uploading its copy.', 422);
+        }
+    }
+    $columns = [];
+    $created = [];
+    foreach (licence_forms() as $form) {
+        $newNo = $profile[$form['number']];
+        $oldNo = stored_licence($existing[$form['number']] ?? null);
+        $oldImage = trim((string) ($existing[$form['image']] ?? ''));
+        $oldImage = $oldImage === '' ? null : $oldImage;
+        $upload = licence_file_selected($form['file']) ? store_upload($form['file'], 'licences') : null;
+        if ($upload !== null) {
+            $created[] = $upload;
+        }
+        if ($newNo === null) {
+            $columns[$form['image']] = null;
+        } elseif ($upload !== null) {
+            $columns[$form['image']] = $upload;
+        } elseif ($oldNo !== $newNo) {
+            $columns[$form['image']] = null;
+        } else {
+            $columns[$form['image']] = $oldImage;
+        }
+    }
+    return ['columns' => $columns, 'created' => $created];
+}
+
+function archive_replaced_licences(int $memberId, array $existing, array $profile, array $images): void
+{
+    $insert = db()->prepare(
+        'INSERT INTO member_licence_history (member_id, form_code, licence_no, expires_on, image_path, status, replaced_at)
+         VALUES (?, ?, ?, ?, ?, ?, NOW())'
+    );
+    foreach (licence_forms() as $code => $form) {
+        $oldNo = stored_licence($existing[$form['number']] ?? null);
+        if ($oldNo === null) {
             continue;
         }
-        $next = licence_value($in[$key]);
-        $current = isset($member[$key]) && $member[$key] !== null && $member[$key] !== ''
-            ? strtoupper((string) $member[$key])
-            : null;
-        if ($next !== $current) {
-            json_error('After approval, only the association can change the drug licence numbers.', 422);
+        $newNo = $profile[$form['number']];
+        $oldExpires = stored_date($existing[$form['expires']] ?? null);
+        $newExpires = $profile[$form['expires']];
+        $oldImage = trim((string) ($existing[$form['image']] ?? ''));
+        $oldImage = $oldImage === '' ? null : $oldImage;
+        $newImage = $images['columns'][$form['image']] ?? null;
+        $numberChanged = $oldNo !== $newNo;
+        $expiryChanged = $oldExpires !== null && $oldExpires !== $newExpires;
+        $imageReplaced = $oldImage !== null && $newImage !== $oldImage;
+        if (!$numberChanged && !$expiryChanged && !$imageReplaced) {
+            continue;
         }
+        $insert->execute([
+            $memberId,
+            $code,
+            $oldNo,
+            $oldExpires,
+            $oldImage,
+            $newNo === null ? 'removed' : 'updated',
+        ]);
     }
 }
 
@@ -933,12 +1259,17 @@ function insert_member(array $profile, string $mobile, string $status, ?string $
         'owner_name', 'shop_name', 'email', 'address',
         'partner2_name', 'partner3_name',
         'residential_address', 'partner2_address', 'partner3_address',
-        'licence_f20', 'licence_f20c', 'licence_f21', 'licence_f21b', 'drug_licence_no',
+        'licence_f20', 'licence_f20_expires', 'licence_f20_image',
+        'licence_f20c', 'licence_f20c_expires', 'licence_f20c_image',
+        'licence_f21', 'licence_f21_expires', 'licence_f21_image',
+        'licence_f21b', 'licence_f21b_expires', 'licence_f21b_image',
+        'drug_licence_no',
         'qualified_person_name', 'pharmacist_reg_no', 'qualified_person_address', 'qualified_person_phone',
         'qualified_person2_name', 'qualified_person2_reg', 'qualified_person2_address', 'qualified_person2_phone',
-        'mobile', 'status', 'photo_path',
+        'mobile', 'status', 'photo_path', 'office_bearers',
     ];
     $params = [];
+    $bearers = office_bearers_json();
     foreach ($columns as $column) {
         if ($column === 'mobile') {
             $params[] = $mobile;
@@ -946,6 +1277,8 @@ function insert_member(array $profile, string $mobile, string $status, ?string $
             $params[] = $status;
         } elseif ($column === 'photo_path') {
             $params[] = $photo;
+        } elseif ($column === 'office_bearers') {
+            $params[] = $bearers;
         } else {
             $params[] = $profile[$column];
         }
@@ -968,10 +1301,17 @@ function member_write_error(PDOException $e): void
 
 function save_member_fields(int $id, array $in, bool $asAdmin): void
 {
+    $stmt = db()->prepare('SELECT * FROM members WHERE id = ? LIMIT 1');
+    $stmt->execute([$id]);
+    $existing = $stmt->fetch();
+    if (!$existing) {
+        json_error('Member not found.', 404);
+    }
     $application = [
         'owner_name', 'shop_name', 'email', 'address', 'residential_address',
-        'licence_f20', 'licence_f20c', 'licence_f21', 'licence_f21b', 'drug_licence_no',
-        'qualified_person_name', 'pharmacist_reg_no',
+        'licence_f20', 'licence_f20_expires', 'licence_f20c', 'licence_f20c_expires',
+        'licence_f21', 'licence_f21_expires', 'licence_f21b', 'licence_f21b_expires',
+        'drug_licence_no', 'qualified_person_name', 'pharmacist_reg_no',
     ];
     $hasApplication = false;
     foreach ($application as $key) {
@@ -980,10 +1320,20 @@ function save_member_fields(int $id, array $in, bool $asAdmin): void
             break;
         }
     }
+    foreach (licence_forms() as $form) {
+        if (licence_file_selected($form['file'])) {
+            $hasApplication = true;
+            break;
+        }
+    }
     $sets = [];
     $params = [];
+    $profile = null;
+    $images = ['columns' => [], 'created' => []];
     if ($hasApplication) {
-        foreach (member_profile_from_input($in, true) as $key => $value) {
+        $profile = member_profile_from_input($in, $asAdmin, $existing);
+        $images = prepare_licence_images($existing, $profile);
+        foreach (array_merge($profile, $images['columns']) as $key => $value) {
             $sets[] = $key . ' = ?';
             $params[] = $value;
         }
@@ -1004,10 +1354,24 @@ function save_member_fields(int $id, array $in, bool $asAdmin): void
         json_error('Nothing to update.', 422);
     }
     $params[] = $id;
+    $db = db();
     try {
-        db()->prepare('UPDATE members SET ' . implode(', ', $sets) . ' WHERE id = ?')->execute($params);
-    } catch (PDOException $e) {
-        member_write_error($e);
+        $db->beginTransaction();
+        if ($profile !== null) {
+            archive_replaced_licences($id, $existing, $profile, $images);
+        }
+        $db->prepare('UPDATE members SET ' . implode(', ', $sets) . ' WHERE id = ?')->execute($params);
+        $db->commit();
+    } catch (Throwable $e) {
+        if ($db->inTransaction()) {
+            $db->rollBack();
+        }
+        foreach ($images['created'] as $path) {
+            delete_upload($path);
+        }
+        if ($e instanceof PDOException) {
+            member_write_error($e);
+        }
         throw $e;
     }
 }

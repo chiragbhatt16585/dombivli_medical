@@ -170,8 +170,17 @@
     return row.status_name || complaintStatus[row.status] || row.status;
   }
 
-  function flyerCard(row) {
-    return '<article class="admin-card flyer-card">' + DMA.flyerButton(row) + "<h3>" + esc(row.title) + "</h3></article>";
+  function statIcon(name) {
+    const paths = {
+      complaints: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+      clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+      bell: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 7h18s-3 0-3-7"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/>',
+    };
+    return '<span class="stat-icon"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">' + (paths[name] || "") + "</svg></span>";
+  }
+
+  function flyerCard(row, index) {
+    return '<article class="admin-card flyer-card"><span class="row-num">' + (index + 1) + "</span>" + DMA.flyerButton(row) + "<h3>" + esc(row.title) + "</h3></article>";
   }
 
   function fact(label, value) {
@@ -184,8 +193,8 @@
   }
 
   function complaintRows(rows) {
-    return rows.map(function (row) {
-      return "<tr><td><strong>" + esc(row.title) + "</strong></td><td>" + esc(row.category_name || "—") +
+    return rows.map(function (row, index) {
+      return '<tr><td class="num">' + (index + 1) + "</td><td><strong>" + esc(row.title) + "</strong></td><td>" + esc(row.category_name || "—") +
         "</td><td>" + badge(row.status, statusName(row)) +
         "</td><td>" + fmtDate(row.created_at) + '</td><td><a class="btn btn-sm btn-secondary" href="#/complaints/' + row.id + '">View</a></td></tr>';
     }).join("");
@@ -209,11 +218,14 @@
           ? "Your details are with the association. Complaints, notices, and the other menus open after your account is verified."
           : "Your account is created. Add the shop, drug licence, qualified person, and a passport photo. The other menus open after the association verifies your account.";
     return layout("Home",
+      DMA.licenceAlert(member) +
       '<div class="admin-card"><p class="help" style="margin-top:0">Signed in as ' + esc(member.owner_name) + "</p>" +
       "<p>" + badge(member.status, memberStatusLabel(member.status)) + "</p>" +
-      "<p>" + esc(message) + '</p><p class="actions"><a class="btn" href="#/profile">' +
+      "<p>" + esc(message) + "</p>" +
+      licenceLine(member) +
+      '<p class="actions"><a class="btn" href="#/profile">' +
       (ready ? "View my details" : "Add shop details") + "</a>" +
-      DMA.applicationActions("/me/application", "dma_member_token") + "</p></div>");
+      DMA.applicationActions("/me/application", "dma_member_token", "icons") + "</p></div>");
   }
 
   async function viewHome() {
@@ -225,7 +237,7 @@
     const unread = notes.filter(function (row) { return !row.read_at; });
     const recent = complaints.slice(0, 4);
     const recentTable = recent.length
-      ? '<div class="table-wrap"><table><thead><tr><th>Subject</th><th>Category</th><th>Status</th><th>Sent</th><th></th></tr></thead><tbody>' +
+      ? '<div class="table-wrap"><table class="member-table"><thead><tr><th class="num">#</th><th>Subject</th><th>Category</th><th>Status</th><th>Sent</th><th></th></tr></thead><tbody>' +
         complaintRows(recent) + "</tbody></table></div>"
       : '<p class="empty">No complaints yet.</p>';
     const updates = unread.length
@@ -236,7 +248,8 @@
         }).join("") + "</div>"
       : "";
     return layout(member.shop_name,
-      '<div class="stack"><section class="admin-card"><p class="help" style="margin-top:0">Signed in as ' + esc(member.owner_name) + "</p>" +
+      '<div class="stack">' + DMA.licenceAlert(member) +
+      '<section class="admin-card"><p class="help" style="margin-top:0">Signed in as ' + esc(member.owner_name) + "</p>" +
       "<p>" + badge(member.status, memberStatusLabel(member.status)) + "</p>" +
       (member.photo_url ? '<img class="owner-photo" src="' + esc(member.photo_url) + '" alt="Shop owner">' : "") +
       wideFact("Firm address", member.address, true) +
@@ -249,7 +262,7 @@
       qualifiedLine(member) +
       ((member.partner2_name || member.partner3_name) ? '<p class="help">Partner details are on Edit shop details.</p>' : "") +
       '<div class="actions" style="margin-top:1rem">' +
-      DMA.applicationActions("/me/application", "dma_member_token") +
+      DMA.applicationActions("/me/application", "dma_member_token", "icons") +
       '<a class="btn btn-outline" href="#/profile">Edit shop details</a></div></section>' +
       (updates ? '<section class="admin-card"><div class="section-head"><h2>Updates</h2><button class="btn btn-sm btn-outline" type="button" id="mark-read">Mark all read</button></div>' + updates + "</section>" : "") +
       '<section class="admin-card"><div class="section-head"><h2>Recent complaints</h2><a class="btn btn-sm btn-secondary" href="#/complaints">See all</a></div>' +
@@ -311,14 +324,24 @@
   }
 
   function licenceLine(member) {
-    const rows = lineFacts([
-      ["Form 20", member.licence_f20],
-      ["Form 20C", member.licence_f20c],
-      ["Form 21", member.licence_f21],
-      ["Form 21B", member.licence_f21b],
-    ]);
-    if (rows) return rows;
-    return lineFacts([["Drug licence", member.drug_licence_no]]);
+    const forms = [
+      ["f20", "Form 20 – Retail Allopathic", member.licence_f20, member.licence_f20_expires, member.licence_f20_url],
+      ["f20c", "Form 20C – Homoeopathic Retail", member.licence_f20c, member.licence_f20c_expires, member.licence_f20c_url],
+      ["f21", "Form 21 – Retail Schedule C/C(1)", member.licence_f21, member.licence_f21_expires, member.licence_f21_url],
+      ["f21b", "Form 21B – Wholesale Schedule C/C(1)", member.licence_f21b, member.licence_f21b_expires, member.licence_f21b_url],
+    ].filter(function (item) { return item[2]; });
+    const history = DMA.licenceHistoryTable(member.licence_history);
+    if (!forms.length) {
+      return lineFacts([["Drug licence", member.drug_licence_no]]) + history;
+    }
+    return '<div class="licence-public-list">' + forms.map(function (item, index) {
+      const till = item[3] ? '<div class="help">Valid till ' + esc(DMA.fmtDay(item[3])) + "</div>" : "";
+      const preview = item[4] && !/\.pdf(\?|$)/i.test(item[4])
+        ? '<img class="licence-preview" src="' + esc(item[4]) + '" alt="' + esc(item[1]) + ' copy">'
+        : "";
+      const copy = '<div class="licence-copy-row">' + preview + DMA.licenceCopyButton(item[4]) + DMA.previousCopyButtons(member.licence_history, item[0]) + "</div>";
+      return '<div class="licence-public"><div class="licence-public-main"><span class="row-num">' + (index + 1) + '</span><div><div class="licence-public-name">' + esc(item[1]) + "</div><div class=\"licence-public-no\">" + esc(item[2]) + "</div>" + till + "</div></div>" + copy + "</div>";
+    }).join("") + "</div>" + history;
   }
 
   function qualifiedLine(member) {
@@ -335,7 +358,7 @@
 
   function applicationFields(row, locked) {
     const photo = row.photo_url
-      ? '<p><img class="owner-photo" src="' + esc(row.photo_url) + '" alt="Shop owner"></p>'
+      ? '<img class="owner-photo" src="' + esc(row.photo_url) + '" alt="Shop owner" data-licence-copy="' + esc(row.photo_url) + '">'
       : "";
     return textField("Name of the firm", "shop_name", row.shop_name, false) +
       '<div class="form-group full"><label>Address of the firm</label><textarea name="address" required>' + esc(row.address || "") + "</textarea></div>" +
@@ -346,10 +369,7 @@
       '<div class="form-group full"><label>Residential address of partner 2</label><textarea name="partner2_address">' + esc(row.partner2_address || "") + "</textarea></div>" +
       '<div class="form-group full"><label>Residential address of partner 3</label><textarea name="partner3_address">' + esc(row.partner3_address || "") + "</textarea></div>" +
       textField("Email", "email", row.email, false, "email") +
-      textField("Form 20", "licence_f20", row.licence_f20, locked) +
-      textField("Form 20C", "licence_f20c", row.licence_f20c, locked) +
-      textField("Form 21", "licence_f21", row.licence_f21, locked) +
-      textField("Form 21B", "licence_f21b", row.licence_f21b, locked) +
+      DMA.licenceCards(row, locked) +
       textField("Qualified person name", "qualified_person_name", row.qualified_person_name, false) +
       textField("Qualified person registration", "pharmacist_reg_no", row.pharmacist_reg_no, false) +
       textField("Qualified person phone", "qualified_person_phone", row.qualified_person_phone, false, "tel") +
@@ -358,9 +378,9 @@
       textField("Qualified person 2 registration", "qualified_person2_reg", row.qualified_person2_reg, false) +
       textField("Qualified person 2 phone", "qualified_person2_phone", row.qualified_person2_phone, false, "tel") +
       '<div class="form-group full"><label>Qualified person 2 address</label><textarea name="qualified_person2_address">' + esc(row.qualified_person2_address || "") + "</textarea></div>" +
-      '<div class="form-group full"><label>Passport-size photo</label>' + photo +
-      '<input type="file" name="photo" accept="image/png,image/jpeg,image/webp,image/gif"' + (row.photo_url || locked ? "" : " required") + '><span class="help">' +
-      (locked ? "After approval, only the association can change the drug licence numbers. " : "") +
+      '<div class="form-group full"><label>Passport-size photo</label><div class="licence-copy-row">' + photo +
+      '<input type="file" name="photo" accept="image/png,image/jpeg,image/webp,image/gif"' + (row.photo_url || locked ? "" : " required") + '></div><span class="help">' +
+      (locked ? "After approval, only the association can change a drug licence, its expiry, or its copy. " : "") +
       (row.photo_url ? "Upload a new photo only if you want to replace the current one." : "Passport-size photo of the shop owner is required.") +
       "</span></div>";
   }
@@ -378,17 +398,17 @@
         return '<a class="' + (status === item.code ? "active" : "") + '" href="#/complaints?status=' + encodeURIComponent(item.code) + '">' + esc(item.name) + "</a>";
       }).join("") + "</div>";
     const list = shown.length
-      ? '<div class="admin-card table-wrap"><table><thead><tr><th>Subject</th><th>Category</th><th>Status</th><th>Sent</th><th></th></tr></thead><tbody>' +
+      ? '<div class="admin-card table-wrap"><table class="member-table"><thead><tr><th class="num">#</th><th>Subject</th><th>Category</th><th>Status</th><th>Sent</th><th></th></tr></thead><tbody>' +
         complaintRows(shown) + "</tbody></table></div>"
       : '<div class="admin-card"><p class="empty">No complaints in this list.</p></div>';
     const canFile = state.member && state.member.status === "approved";
     return layout("Complaints",
       '<div class="section-head"><p class="help" style="margin:0">Track each complaint from Submitted to Resolved.</p>' +
       (canFile ? '<a class="icon-add" href="#/complaints/new" aria-label="Add complaint" title="Add complaint"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg></a>' : "") + "</div>" +
-      '<div class="stats"><div class="stat"><div class="label">Complaints</div><div class="value">' + rows.length +
-      '</div></div><div class="stat"><div class="label">Still open</div><div class="value">' + openCount +
-      '</div></div><div class="stat"><div class="label">New updates</div><div class="value">' + unread +
-      "</div></div></div>" + chips + list);
+      '<div class="stats"><div class="stat">' + statIcon("complaints") + '<div><div class="label">Complaints</div><div class="value">' + rows.length +
+      '</div></div></div><div class="stat">' + statIcon("clock") + '<div><div class="label">Still open</div><div class="value">' + openCount +
+      '</div></div></div><div class="stat">' + statIcon("bell") + '<div><div class="label">New updates</div><div class="value">' + unread +
+      "</div></div></div></div>" + chips + list);
   }
 
   async function viewNewComplaint() {
@@ -442,12 +462,14 @@
       ? ""
       : '<div class="banner">Add the shop, drug licences, qualified person, and a passport photo. Complaints and notices open after the association verifies your account.</div>';
     return layout(row.status === "approved" ? "Shop details" : "My details",
+      DMA.licenceAlert(row) +
       intro + '<section class="admin-card"><h2 style="margin:0 0 0.35rem;font-size:1.05rem">Membership application</h2><p class="help" style="margin-top:0">This is your filled CAF, including the passport photo.</p><div class="actions">' +
-      DMA.applicationActions("/me/application", "dma_member_token") +
+      DMA.applicationActions("/me/application", "dma_member_token", "icons") +
       '</div></section><form class="admin-card" id="profile-form"><div class="form-grid">' +
       '<div class="form-group"><label>Mobile</label><input value="' + esc(row.mobile) + '" disabled><span class="help">Mobile is the sign-in. Ask the association office to change it.</span></div>' +
       applicationFields(row, locked) +
-      '<div class="form-group full"><button class="btn" type="submit">Save profile</button></div></div></form>');
+      '<div class="form-group full"><button class="btn" type="submit">Save profile</button></div></div></form>' +
+      (DMA.licenceHistoryTable(row.licence_history) ? '<section class="admin-card">' + DMA.licenceHistoryTable(row.licence_history) + "</section>" : ""));
   }
 
   function textField(label, name, value, disabled, type) {
@@ -604,7 +626,7 @@
         event.preventDefault();
         const form = event.target;
         const data = new FormData(form);
-        if (!data.get("photo") || !data.get("photo").name) data.delete("photo");
+        DMA.dropEmptyFiles(data, ["photo"].concat(DMA.licenceFileFields));
         form.querySelector("button").disabled = true;
         try {
           state.member = (await api.request("/me", { method: "POST", form: data })).data;

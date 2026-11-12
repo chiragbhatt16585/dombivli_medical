@@ -79,6 +79,15 @@ function require_member(): array
     return $member;
 }
 
+function require_superadmin(): array
+{
+    $admin = require_admin();
+    if (($admin['role'] ?? 'staff') !== 'superadmin') {
+        json_error('Only a super admin can manage staff.', 403);
+    }
+    return $admin;
+}
+
 function require_approved_member(): array
 {
     $member = require_member();
